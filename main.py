@@ -1,4 +1,4 @@
-"""astrbot_plugin_wpp_cloud 插件入口（WPP Cloud 专用）。
+"""astrbot_plugin_wpp_cloud 插件入口（个人微信 Pad 协议 · 云端托管）。
 
 官方平台适配器插件范式 (docs/zh/dev/plugin-platform-adapter.md):
   - main.py 必须有 Star 类 (类名以 Plugin 结尾会被自动发现)
