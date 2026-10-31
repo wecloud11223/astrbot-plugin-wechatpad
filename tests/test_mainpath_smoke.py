@@ -517,7 +517,6 @@ class TestMainPathSmoke(unittest.TestCase):
         evs = self.run_src(
             a,
             {
-                "sender_id": "filehelper",
                 "recipient_id": "filehelper",
                 "msg_id": "help2",
                 "content": "/help group",
