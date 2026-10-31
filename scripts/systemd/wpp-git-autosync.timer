@@ -1,0 +1,12 @@
+[Unit]
+Description=每 5 分钟兜底同步 WPP 仓库到 GitHub（hook 漏了的改动由它补）
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=wpp-git-autosync.service
+
+[Install]
+WantedBy=timers.target

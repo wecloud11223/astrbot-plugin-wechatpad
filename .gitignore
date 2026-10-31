@@ -1,0 +1,27 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 多账号运行时数据（每账号白名单/webhook token、实例标识，含凭证 ⇒ 不入库）
+accounts/
+data/
+.webhook_token
+*.log
+
+# 备份/临时
+*.bak
+*.bak-*
+*.tmp
+*.orig
+*.rej
+.DS_Store
+
+# 本机专属的真实标识黑名单（含生产 wxid/群号/域名，禁止提交）
+public_tree_denylist.txt

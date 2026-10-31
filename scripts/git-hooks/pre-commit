@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# pre-commit：提交前跑敏感信息扫描（禁止把密钥/真实账号推进公开仓）。
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+exec bash "$root/scripts/git-secret-scan.sh" --staged

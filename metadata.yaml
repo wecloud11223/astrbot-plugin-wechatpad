@@ -1,0 +1,6 @@
+name: astrbot_plugin_wpp_cloud
+desc: WPP Cloud 托管个人微信适配器（WPP 网关 + 普通回调 + /Msg/Sync）
+version: 1.3.0
+author: jiexiaoyin
+astrbot_version: ">=4.16.0,<5"
+repo: https://github.com/jiexiaoyin/astrbot-plugin-wpp-cloud

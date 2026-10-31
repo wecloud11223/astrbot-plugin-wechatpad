@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# post-commit：提交成功后**后台**推送，不阻塞 agent 的下一步。
+# 推送失败只记日志（.git/autosync-push.log），改动保留在本地，timer 会重试。
+root="$(git rev-parse --show-toplevel)"
+logfile="$root/.git/autosync-push.log"
+branch="$(git rev-parse --abbrev-ref HEAD)"
+{
+    echo "== $(date '+%F %T') push origin $branch"
+    git -C "$root" push origin "$branch" 2>&1 || echo "!! push 失败，等待下一轮 autosync 重试"
+} >>"$logfile" 2>&1 &
+disown 2>/dev/null || true
+exit 0

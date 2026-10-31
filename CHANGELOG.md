@@ -1,0 +1,881 @@
+# Changelog
+
+## v1.3.0 (2026-10-27) — 平台技术名改为「个人微信(Pad协议)」
+
+### 变更
+- **平台技术名 `PLATFORM_NAME` 由 `WPP Cloud（个人微信托管）` 改为 `个人微信(Pad协议)`**。
+  原因：Dashboard「创建机器人 → 选择消息平台类别」渲染的是
+  `metadata.platform_group.metadata.platform.config_template` 的**键**
+  （前端 `AddNewPlatform`：`items: Object.keys(platformTemplates)` +
+  `item-title="name"`；Vuetify 对字符串 item 取不到 `name` 时回退成 item 本身），
+  而该键就是适配器注册名 `adapter_name`（= 配置里的 `type`）。因此只改
+  `adapter_display_name` 无法改变那个下拉，技术名必须是用户要看到的名字。
+- `PLATFORM_DISPLAY_NAME` 与技术名同值，`/api/v1/bot-types` 的 `type` 与
+  `display_name` 现在一致。
+
+### 兼容
+- 老实例的 `type` 仍是 `WPP Cloud（个人微信托管）`：模块导入时把这些历史名
+  `setdefault` 进 `platform_cls_map`（**不带** `default_config_tmpl`，所以不会
+  在创建下拉里出现重复项），升级后老实例照常加载。
+- `normalize_platform_config()` 会把实例配置里的历史 `type` 自动迁移成当前名
+  并写盘，面板随即显示新名字；`safe_account_id()` 同时认历史名前缀，运行时
+  目录/回调 token 不发生任何迁移。
+- 自动派生 `webhook_uuid` 的种子后缀固定为 `wpp-cloud`（`WEBHOOK_UUID_SEED_SUFFIX`），
+  与平台显示名解耦——以后再改名不会换掉回调地址。
+
+### 测试
+- `tests/test_config_uniformity.py`：技术名 = 创建下拉名、历史名注册为别名且
+  不进创建下拉、`type` 自动迁移、当前 `type` 不被改写。
+- 全量 323 用例通过。
+
+## v1.2.0 (2026-10-27) — 配置口径统一 + 安全加固（评审整改）
+
+### 修复（安全）
+- **filehelper 管理命令可被伪造投递触发**（P0）：旧逻辑只拒 `direction=incoming`，
+  没写 direction 就当成"自己发的"——回调 URL 公网可达，任何人都能执行
+  `/user add`、`/group add`、`/welcome off` 改写白名单。现在要求投递**已认证**
+  （WS/Sync 的 Bearer 连接、legacy URL token、或 v2 HMAC 验签通过），且
+  消息不是入站、并明确标记 outgoing 或发送者就是本账号；否则 WARNING 拒绝。
+- **统一 Webhook 未配 secret 时 fail-closed**（P0）：`/api/platform/webhook/<uuid>`
+  的 uuid 只是 `sha256(实例id)[:16]` 路由键、且 AstrBot 把该前缀排除在 dashboard
+  鉴权外，没 secret 等于谁都能 POST 一条伪造微信消息进 LLM。现在缺 secret 直接
+  403 并打一条 ERROR 指引（legacy 模式仍以 URL token 为凭证）。
+- 图片下载禁用重定向、只允许 https + 标准端口，堵住"白名单域名 302 到内网"的
+  SSRF 旁路。
+
+### 修复（消息正确性）
+- **并发重复提交**（P0）：去重是"先检查后记录"，记录发生在媒体下载（最长 120s）
+  之后，而 `_process_src` 被 WS worker / `/Msg/Sync` / 回调三处并发调用 → 同一条
+  消息可被提交两次（两次 AI 回复、命令执行两次）。新增 `_inflight_keys` 在第一个
+  await 之前占位，`_process_src` 变成并发安全外壳，主体移到 `_process_src_inner`。
+- **回调 inline 处理导致重投**：处理改为入队后立刻 ack 200，不再让 WPP 等完整
+  流水线（群资料 10s + 昵称 8s + 媒体 120s）。
+- **`/Msg/Sync` 派发失败仍推进游标**：改为保持游标等下一轮重拉，靠 msg_id 去重
+  挡住已成功的条目（原来会永久丢消息）。
+- **推送通知在拉取期间被丢弃**：改为记 pending，本轮结束立刻补拉一趟，不再退化
+  成等 60s 定时器。
+- `extract_sync_items`、媒体下载失败等静默路径补 WARNING（含 HTTP 状态与响应头）。
+
+### 修复（发送）
+- 出站媒体编码加 20MB 上限并移入线程池：100MB 文件原先会造成 ~500MB 瞬时内存
+  尖峰 + 事件循环卡死数秒。
+- 408/429/503 现在即使对非幂等发送也重试一次（vendor 明确没执行），并尊重
+  `Retry-After`；500 仍不重试。
+- 引用/语音的"降级重发全文"只在确定性失败时做；网络超时、部分语音段已送达时
+  不再重发，避免用户收到两份内容。
+- 复读保护改为"确认发送成功后才计数"：不再把 `Skipped` 记成 `sent`、不再让失败
+  发送烧掉配额。
+- 19 位 msg_id 不再经 `float()`（>2^53 会丢低位，视频下载拿错 id）。
+
+### 修复（配置统一 / 生命周期）
+- `default_config_tmpl` 提成模块级 `DEFAULT_CONFIG_TMPL`，装饰器传 `dict(...)` 拷贝；
+  新增 `normalize_platform_config()`：任意实例启动时按模板补齐缺键、纠类型、
+  夹数值区间、校验枚举（`wpp_group_reply`、`wpp_heartflow_whitelist_mode`），
+  有变更才落盘，日志只打键名（不打印 secret）。
+- 缺 `unified_webhook_mode` 的老实例按 `False` 补齐，已登记的 legacy 回调不会被
+  悄悄换掉。
+- 插件热重载不再丢共享监听器/令牌锁：注册表挂到常驻的 `astrbot` 包对象上，
+  避免重载后 errno 98 与同一令牌双轮询。
+- 启动预检移出 `_lifecycle_lock` 并加 30s 硬超时：停用/删除机器人不再被网络
+  预检卡到几十秒。
+- 令牌锁在清理之前释放，`_stop_resources` 用 shield 保护，避免取消时锁残留。
+- `webhook_path` 自动补前导 `/`（原来写 `wpp-cloud/webhook` 会永远 404）；
+  `webhook_port` 允许 `0`（内核分配临时端口，测试用）。
+- 策略键优先级打日志说明：账号目录 policy 文件覆盖平台配置里的种子值。
+
+### 变更
+- 添加机器人列表显示名改为 **个人微信(Pad协议)**（`PLATFORM_DISPLAY_NAME`），
+  技术名 `PLATFORM_NAME` 不变（它就是配置里的 `type`，改名会让已有实例失联）。
+
+### 测试
+- 新增 `tests/test_command_auth.py`（10 例）：未认证/入站/未知方向/无来源证明的命令
+  被拒、认证 + outgoing 或 sender=自己放行、`/Msg/Sync` 视作认证、并发同一 msg_id
+  只提交一次、失败后 inflight 释放。
+- 新增 `tests/test_config_uniformity.py`（13 例）：模板=元数据键表、缺键补齐、
+  类型纠正、区间夹取、幂等、uuid 派生与回写、两实例最终键表一致。
+- 调整旧测试以匹配新契约（503 重试、派发失败不推进游标、统一模式缺 secret 403）。
+- 容器内全量 **320 passed**。
+
+## v1.1.0 (2026-10-27) — 多账号：统一 Webhook + 回调字段可见
+
+### 修复
+- **新实例无法启用**：每个实例都在 `run()` 里自己 bind `webhook_port`（默认 6199），
+  第二个账号必然撞 `OSError: [Errno 98] address already in use`，`run()` 抛错后
+  平台被标 ERROR、`enable` 退回 false。现在默认走 AstrBot 统一 Webhook，不占端口。
+- **新实例无法填写 webhook**：`default_config_tmpl` 里没有任何 webhook 键，AstrBot
+  新建机器人时用该模板生成表单，用户根本没有字段可填、也看不到「查看 Webhook」
+  （前端只在 `runtimeStat.unified_webhook` 为真时显示）。模板与 `config_metadata`
+  已补齐 `unified_webhook_mode` / `webhook_uuid` / `webhook_public_url` /
+  `webhook_secret` / host / port / path / token。
+
+### 变更
+- 新增 `unified_webhook_mode`（模板默认 `true`）：回调走 AstrBot 自己的
+  `GET|POST /api/platform/webhook/<webhook_uuid>`，多实例共用 AstrBot 端口。
+  AstrBot 的 `WEBHOOK_SUPPORTED_PLATFORMS` 不含本插件类型，`webhook_uuid` 由
+  `sha256(f"{实例id}:wpp-cloud")[:16]` 确定性派生，无需落盘、重启后地址不变，
+  并回写 `platform.config` 以便 `find_platform_by_uuid()` / 前端识别。
+- 新增 `async def webhook_callback(request)`：GET 探测返回 `ok`，POST 复用抽出的
+  `_process_webhook(headers, raw) -> (body, status)`；统一模式下路径由 uuid 决定，
+  不再校验 URL token，v2 HMAC 校验保留。
+- **独立监听模式支持多实例共用端口**：模块级 `_SharedWebhookServer` 按
+  `(host, port)` 复用同一个 aiohttp server，按各自回调路径分发；端口真被别的
+  程序占用时抛带指引的 `RuntimeError`（提示改用统一 Webhook 或换端口）。
+- 配置里没有 `unified_webhook_mode` 键的老实例保持独立监听，已登记在 WPP 控制台
+  的回调地址不会被悄悄换掉。
+- `get_stats()` 额外返回 `webhook_url`，便于前端/排障直接看到当前回调地址。
+
+### 测试
+- 新增 `tests/test_unified_webhook.py`（20 例）：模板/元数据完整性、uuid 派生与回写、
+  统一入口 GET/POST/签名/坏 JSON、回调地址解析、两实例共用一个 server、
+  按路径分发、日志格式串（stdlib logging 用 `%`）不抛错。
+- 容器内全量 294 passed。
+
+## v1.0.0 (2026-10-26) — WPP Cloud 专用分支
+
+本版本是新插件 `astrbot_plugin_wpp_cloud` 的起点：从 `astrbot_plugin_wpp`
+分叉，**只适配 WPP Cloud 托管**，原插件保持不变。
+
+### 变更
+- **传输面改为 WPP 网关**：`.../api/v1/gateway` + `Authorization: Bearer wxa_...`；
+  不再拼 `/api`、不再带 `?authcode=`、不再发送 `TokenKey`。
+- **本地网关边界**：Admin/Webhook/Runtime/Customized、扫码/退出、SetProxy、
+  GetBoundHardDevices、StartAutoSync 等在客户端先挡（`cloud_blocked`）。
+- **入站改为 WPP 回调 + /Msg/Sync**：不建立 vendor WS；回调只负责通知，
+  正文统一从 `/Msg/Sync` 拉取。
+- **首次同步不回放**：只建立 `KeyBuf` 游标；先派发后前进游标；读游标失败
+  跳过本轮而不是当成首次。
+- **WPP 回调 v2 校验**：`HMAC-SHA256(secret, f"{TsMs}.{DeliveryID}." + body)`，
+  默认 ±300s 防重放（`WPP_WEBHOOK_MAX_SKEW_SEC`）。
+- **回调地址自动落盘**：完整地址写入 `plugin_data/.../webhooks/<id>.callback-url`
+  （0600），日志只显示脱敏地址。
+- 平台技术名改为 `WPP Cloud（个人微信托管）`，可与旧插件并存安装。
+
+### 测试
+- 新增 `tests/test_cloud_client.py`、`tests/test_sync_fallback.py`；
+  `test_webhook_guard.py` 改为 v2 签名；全量 274 passed（容器内运行）。
+- 另跑真实主路径烟雾：假网关 + 签名回调 → `/Msg/Sync` 派发 → 网关发送，
+  验证请求路径、Bearer 头、无 vendor 回调注册。
+
+---
+以下为分叉前的 vendor 直连版本历史，仅作留档。
+
+## v0.15.1 (2026-10-25) — 保活告警降噪与状态查询节流
+
+### 修复
+- **保活 WARNING 刷屏**：vendor 未登录时 `GetOnlineInfo` 可能返回 `Code=0`
+  但 `online=false`，随后 `AutoHeartBeat` 返回 `Code=-1`；旧版每 30s 记一条
+  「保活检查失败」，重启后连续刷屏十几分钟。现在按状态机只在状态变化时告警：
+  - `Code=-1`（未登录/缓存缺失）直接判定需要人工扫码，不再调用必然失败的
+    `AutoHeartBeat`，登录前只告警一次；
+  - 已登录但长连接未建立时触发心跳，失败后 5 分钟内退避；
+  - 查询异常/恢复在线各记一次，不再逐轮重复。
+- **状态查询节流**：`_refresh_account_status()` 复用本次 `GetOnlineInfo` 结果，
+  个人资料最多每 10 分钟拉取一次；状态循环不再每 30s 请求一次
+  `GetContractProfile`。
+- **Heartflow 周期同步日志降噪**：白名单无变化时（每 5 分钟自愈）由 INFO
+  降为 DEBUG，避免日志被「写盘=否」淹没。
+
+### 测试
+- 新增 `tests/test_keepalive.py`：未登录不触发心跳、告警只出现一次、
+  心跳 5 分钟退避、恢复在线日志、资料刷新节流。254 passed。
+
+## v0.15.0 (2026-10-23) — 超时/事件循环加固与 webhook fail-closed
+
+### 修复
+- **预取失败负缓存**：群资料/昵称预取在取消、超时路径上也会写 60s 负缓存，
+  不再每条消息都重打 vendor（前版只在函数正常结束时写）。
+- **发送超时**：`send_file` / `send_video` 放宽到 180s（100MB base64 上传
+  30s 不够）；视频分片下载增加 600s 总时限，避免异常视频无限占用 worker。
+- **ffmpeg/ffprobe 限时**：语音解码/探测 60s 超时即杀子进程，损坏媒体不再
+  让持有会话锁的发送流程永久挂起。
+- **事件循环不再被 fsync 阻塞**：去重落盘、策略保存、群成员基线、进群欢迎
+  开关全部移入线程池；成员基线增加账号级锁避免交叉写坏快照。
+- **SSRF 白名单后缀漏洞**：裸 `endswith("qlogo.cn")` 会放过 `evilqlogo.cn`；
+  改为精确域名/子域匹配，并移除 `127.0.0.1`/`localhost` 放行。
+- **webhook fail-closed**：`webhook_secret` 为空拒绝启动 webhook；回调只接受
+  HMAC-SHA256，拒绝 md5/sha1 降级；签名失败/path 不匹配日志不再输出 URL token。
+- **filehelper 命令方向校验**：只认「发往文件助手」的消息；`sender=filehelper`
+  不再触发管理命令；vendor 明确标为 incoming 的请求直接拒绝执行。
+- **WS 重连退避**：连接稳定 30s 后才重置为 1s，连上即断不再形成重连风暴。
+- **引用回复复读保护**：`send_app_xml` 与文本共用出站复读保护。
+- **At/引用丢失**：媒体前的空 `flush_text` 不再清掉待发送的 At 与 Reply。
+- **查询接口超时**：`get_online_info` / `get_contract_profile` /
+  `get_long_link_status` 捕获 `asyncio.TimeoutError`，不再冒出未处理异常。
+- **可观测性**：账号 `stats` 暴露累计 filtered/ignored/dropped/observed；
+  下载辅助函数失败不再静默 `return None`。
+
+### 变更
+- 控制台账号卡片新增「私聊全部放行（fail-open）」开关，直接对应
+  `wpp_private_allow_all`，并在预览中显示私聊模式。
+- `deploy.sh` 只拷贝运行所需文件（排除 tests/.git/.github/缓存/data），并改为
+  整目录替换，已删除/改名的模块不会残留。
+- CI 增加 pytest job（在 `soulter/astrbot:v4.29.1` 镜像内运行）。
+- 文档：补充 DEPLOY v0.14.0 升级说明（私聊 fail-closed、webhook 必须配密钥）；
+  README 修正容器内测试路径、插件名与发送链路冒烟说明。
+
+## v0.14.0 (2026-10-23) — 安全加固、生命周期修复与插件名合规
+
+### 变更
+- **插件名改为合法 Python 标识符**：`metadata.name` / `PLUGIN_NAME` 由
+  `astrbot-plugin-wpp` 改为 `astrbot_plugin_wpp`（AstrBot 4.29 安装校验要求
+  `str.isidentifier()`）。部署目录与 `plugin_data` 目录同步改名，见 DEPLOY.md。
+- **私聊默认 fail-closed**：新增 `wpp_private_allow_all`（默认 `false`）。
+  空白名单不再默认放行所有私聊；需要“全部放行”必须显式开启。
+  已有 `allow_users` 配置不受影响。
+
+### 修复
+- **白名单撤销不生效**：策略文件中的 `allow_users` 改为整体替换，`/user del`
+  或面板删除后不会在下次热加载时从平台配置种子复活。
+- **策略保存失败静默**：`save_policy()` 返回是否落盘；命令与 Web API 在失败时
+  明确回错，不再假装成功。
+- **发送全部失败静默**：`event.send()` / `send_by_session()` 在 `sent=0` 且
+  `failed>0` 时抛错；部分失败记 warning。
+- **生命周期竞态**：`run()` 增加 lifecycle 锁与 shutdown 检查，启动异常重新
+  抛出并清理 WS/worker/webhook；`terminate()` 与 `run()` 共用幂等
+  `_stop_resources()`，authcode 占用锁在失败路径上正确释放。
+- **WS 鉴权 URL**：带其它 query 的 WS 地址也会追加 `authcode`，并做 URL 编码、
+  去重；连接日志隐去 token。
+- **去重时机**：消息处理成功提交后才写入去重；处理异常不再导致重推消息被
+  永久丢弃。队列关闭排空增加 10s 总时限。
+- **vendor 瞬时故障重试**：查询类接口对 HTTP 5xx / 非 JSON 响应退避重试；
+  业务 `Code!=0` 不重试。发送类接口仍保持不重试（避免重复发送）。
+- **出站图片上限与阻塞**：图片引用限制 20MiB（本地文件/HTTP 流式/base64），
+  文件与 base64 编码移入线程池；SILK 分段编码不再阻塞事件循环。
+- **缓存/锁有界**：昵称、群资料、发送锁与节流表增加 TTL 清理与容量上限。
+- **Heartflow 配置写入**：临时文件 fsync 后再原子替换，异常时清理临时文件。
+- **账号目录隔离**：`safe_account_id()` 净化丢信息时追加原始 id 指纹，
+  避免不同中文账号落到同一目录。
+
+## v0.13.0 (2026-10-23) — 平台技术名恢复中文，图标分离
+
+### 变更
+- **平台技术名恢复为「个人微信（Pad协议）」**：AstrBot 4.29 Dashboard 的机器人
+  列表和新增下拉直接显示平台技术名与配置 `id`/`type`，不读取
+  `adapter_display_name`。为了让这两个位置显示中文，`PlatformMetadata.name`、
+  配置 `type` 和默认 `id` 均使用中文。若已按 v0.12.0 改成 `wpp`，需反向迁移
+  平台配置、DB 中的 UMO/会话/统计/偏好和 Heartflow 白名单，步骤见
+  [DEPLOY.md](DEPLOY.md)。
+- **平台图标与插件图标分离**：机器人添加/列表使用 `logo-platform.png`
+  （黄色微信图标）；AstrBot 侧边栏扩展功能列表仍使用根目录 `logo.png`
+  （灰色微信线条图标）。此前 v0.12.0 误把两处都改成了灰色。
+- **运行时目录保持稳定 ASCII 前缀**：`safe_account_id()` 把平台名前缀
+  `个人微信（Pad协议）` 映射为 `wpp`，`-shop2` 等后缀映射为 `wpp-shop2`，
+  避免中文 id 被净化后多实例冲突；已有 `accounts/wpp/`、`webhooks/wpp.token`
+  无需迁移。UMO 前缀仍按实例 `id`（默认中文）。
+
+### 修复
+- 更新 README 中的平台实例、UMO、图标和多账号示例；补充 v0.13.0 反向迁移说明。
+- 测试覆盖中文平台名与 `safe_account_id()` 的中文实例映射。
+
+## v0.12.0 (2026-10-23) — 平台技术名恢复 `wpp`，页面合并与规范修正
+
+### 变更
+- **平台技术名改回 `wpp`**：`PlatformMetadata.name`、配置 `type` 与默认 `id`
+  恢复为 ASCII `wpp`；Dashboard 展示名继续由 `adapter_display_name` 提供为
+  「个人微信（Pad协议）」。升级需同步迁移平台配置、DB UMO/会话/统计/偏好、
+  Heartflow 白名单与运行时目录，步骤见 [DEPLOY.md](DEPLOY.md)。
+- **控制台与账号诊断合并为一个页面**：`pages/console` 内新增「策略」/「账号诊断」
+  tab，`pages/diagnostics` 删除。此前诊断页跳转依赖跨页面 token，AstrBot 的
+  view token 按页面签发，跳转会 401。页面显示名改为 **WeChatPad Control Center**，
+  中文环境显示「微信(Pad协议)控制中心」。
+- **移除插件源码目录存储兜底**：不再读写插件目录下的 `accounts/`、`data/`，
+  运行时数据只写 AstrBot 标准插件数据目录；旧残留备份后可删除。
+- **图标统一为灰色微信线条图标**：控制台头部 logo 与插件 `logo.png`
+  （扩展功能卡片/平台适配器）使用同一套灰色线条微信图标。
+
+### 修复
+- `run()` 生命周期：启动完成后等待 `terminate()` 触发的 shutdown 事件，
+  run 不再立即返回；配合平台管理器的 terminate 顺序干净退出。
+- 不再在导入时修改 `websockets`/`httpcore` 全局 logger 级别；只为 WPP 自己的
+  WS 连接传入 `logger=`，不影响其他插件日志。
+- 媒体与发送路径的阻塞文件 I/O（读、写、unlink、大小/时长探测）改用
+  `asyncio.to_thread`，避免阻塞事件循环。
+- 测试同步断言 `meta.name == "wpp"`、显示名，以及旧源码目录不再被读取。
+
+## v0.11.7 (2026-10-23) — 开发规范审计修正
+
+### 修复
+- `/wpp_status` 增加管理员权限限制，与 `/wpp_policy`、`/wpp_sync` 保持一致。
+- 平台适配器注册显式声明 `support_streaming_message=False`，使 Dashboard
+  展示的能力与实例元数据一致（此前 registry 默认报告为支持流式）。
+- 移除 `metadata.yaml` 中非 AstrBot 标准的 `entry` 字段。
+- `.gitignore` 增加 `data/`，避免运行时数据误入仓库。
+- 全仓执行 `ruff format`，统一格式。
+
+## v0.11.6 (2026-10-23) — 语音发送失败降级为文字
+
+### 修复
+- TTS 语音回复发送失败（vendor `Code=-2`、超限、文件不可读等）时，
+  此前整条回复静默丢失。现在读取 `Record.text`（TTS 原文）降级发送文字，
+  并打 INFO 日志；文字降级也失败才计入错误。
+- 无原文的语音（用户转发/普通语音）保持原行为：超限降级文件，发送失败报错。
+- 配套 TTS 情绪路由插件补丁：构建语音消息时把原文写入 `Record.text`。
+
+## v0.11.5 (2026-10-23) — 单条恢复 60 秒，按容量选码率
+
+### 变更
+- 实测微信端 **6k/8k/9kbps SILK 均能正常播放**（filehelper 三条 60s 语音实听确认），
+  v0.11.4「只认 24kbps」的假设不成立。
+- 单条语音上限恢复为 **60 秒**：不再固定 20 秒切段；60s 用 8kbps 编码约 55.8KiB，
+  可单条通过 vendor 限制（pysilk 标称码率≠实际码率，24k 实测约 19.5kbps）。
+- vendor 真实阈值修正为 **~65,000B**（本版实测 64,974B 成功 / 65,180B 失败，
+  失败响应 `Offset=65000`），常量取 64,500B 留余量；此前按 64KiB 估算偏保守。
+- 每段按 **24k→16k→12k→10k→9k→8k→6k** 阶梯选最高的能塞进 64,500B 的码率，
+  短语音仍用高码率，长语音自动降档；6kbps 仍超限才收缩分段。
+- 65 秒语音现在为 2 段（60s@8k + 5s@24k），130 秒为 3 段（60+60+10）。
+
+## v0.11.4 (2026-10-23) — 语音固定 24kbps 码率
+
+### 修复
+- 微信播放端只认 SILK **固定 24kbps**，v0.11.3 为塞进 64KiB 而降到 8kbps
+  分段，发送成功但微信里可能无声。
+- 改为始终 24kbps 编码，容量上限通过**缩短分段**解决：每段默认 20 秒
+  （≈60KB），编码超 64KiB 时按 4/5 收缩重试；单段仍 ≤60 秒。
+- 70 秒语音现在会分成 4 段（20+20+20+10），而不是 2 段，但每段都能正常播放。
+
+## v0.11.3 (2026-10-23) — 超 60 秒语音自动分段
+
+### 新增
+- 微信单条语音上限 60 秒：超过时自动按 60 秒切片，逐段独立选码率
+  （24k→16k→12k→8k，保证每段 ≤64KiB）后依次发送，不再降级成文件。
+- 60 秒整段在 8kbps 下约 60KB，可通过 vendor 的 64KiB 限制。
+- 分段发送会打 INFO 日志（原时长 + 段数），便于排查。
+
+## v0.11.2 (2026-10-23) — 语音统一转 SILK，绕开 64KiB 上限
+
+### 修复
+- 实测 vendor `/Msg/SendVoice` 还有第二个硬限制：Base64 解码后的语音
+  **payload > 64KiB 直接返回 `Code=-2`**（64744B 成功 / 65580B 失败，
+  与 mp3/silk 格式无关，30 秒 SILK 同样被拒）。64kbps mp3 只能发约 8 秒，
+  TTS 稍长的回复就会静默丢失。
+- 现在出站语音统一转微信原生 **SILK**（`pysilk`，Tencent 标记），并按容量
+  自动降码率 24k→16k→12k→8k，保证 payload ≤ 64KiB。
+- pysilk/ffmpeg 不可用或超长仍超限时，降级为**文件发送**并打 WARNING，
+  不再静默丢回复。
+
+## v0.11.1 (2026-10-23) — 修复发语音失败 (Code=-2)
+
+### 修复
+- `/Msg/SendVoice` 的 `VoiceTime` 之前只对 `.wav` 计算，mp3 等格式恒传 `0`，
+  vendor 直接返回 `Code=-2 / MsgId=0`，表现为「机器人回复了但微信里收不到」
+  （LLM 与 TTS 均成功，仅最后一段语音发不出去）。
+- 现在统一取真实时长：ffprobe → wav 头 / 纯 Python MP3 帧解析兜底；
+  取不到时长会打 WARNING 再尝试发送。
+- 注：主链路里 AstrBot `Record.convert_to_file_path()` 会把 TTS 音频转成 WAV，
+  实际故障是 WAV payload 超 64KiB，本版未解决，见 v0.11.2。
+
+## v0.11.0 (2026-10-22) — 显示名改为「个人微信（Pad协议）」
+
+### 变更（需迁移配置）
+- 适配器注册名、`PlatformMetadata.name`、配置 `type`/`id` 统一为
+  **个人微信（Pad协议）**。AstrBot 4.29 的机器人列表标题显示配置 `id`、副标题
+  显示 `type`，新增下拉显示适配器注册名，因此三处必须一致。
+- 升级时需把已有平台配置的 `type`/`id` 从 `wpp` 改为 `个人微信（Pad协议）`；
+  UMO、会话/统计/偏好数据需要同步迁移（详见 DEPLOY.md）。
+- 平台图标改为黄色微信双气泡图标（`logo.png`，透明背景）。
+- 内部运行时目录按实例 id 净化：`个人微信（Pad协议）` → `accounts/Pad/`。
+
+### 测试
+- 增加平台元数据名称断言；测试总数 216。
+
+## v0.10.0 (2026-10-22) — 账号模型改为「一实例一账号」
+
+### 变更（破坏性）
+- **一个平台实例 = 一个 `wpp_auth_token`（X-Access-Token = authcode）= 一个微信账号。**
+  移除配置项 `wpp_accounts` 及单实例内多账号解析：该模型会造成
+  「一个 authcode 下挂多个微信」的误解，而 WPP/authcode 本身与微信账号是一一对应的。
+- 多账号改为添加多个「微信 WPP」平台实例：`id` 全平台唯一、各自填写自己的
+  `wpp_auth_token`；每个实例独立 WS、白名单、群策略、去重与运行时数据目录。
+- 新增 authcode 运行锁：同一 authcode 被两个实例配置时，后启动的实例报
+  `同一 authcode 已被平台实例 ... 使用` 并拒绝启动，避免两个 WS 互抢消息。
+- 未配置 `wpp_auth_token` 时启动直接报错，不再静默空转。
+- 旧 `wpp_accounts` 配置仍保留在文件中时会输出告警并被忽略；升级时请按实例拆分
+  （原来的每个账号 → 一个平台实例）。
+- 内部 `accounts` 列表恒为 0 或 1 个账号，控制台/命令/API 结构保持兼容。
+
+### 测试
+- 多账号解析测试改为单账号/旧配置忽略/authcode 锁/缺 token 快速失败用例；
+  测试总数 214。
+
+## v0.9.0 (2026-10-20) — 新人进群欢迎语
+
+### 新增
+- **进群欢迎语**（纯模板，不含 LLM 润色）：
+  - 识别群成员变动系统通知（`msgType=10000` 占位符 / `kind=system` /
+    进群退群文案 / 嵌套原文），通知本身仍按既有规则静默丢弃，不进入 AstrBot 事件；
+  - 收到通知后强拉一次群成员表，与 per-account 基线 `members.json` 做 diff，
+    只为**真正新增**的成员发欢迎语；
+  - 首次同步某群只建基线、不欢迎任何人；`maxBatch`（默认 3）拦截基线重建/
+    清表造成的大批「新人」；同群 30 秒内只抓一次；
+  - **先落盘新基线、再发欢迎语**：至多一次，宁可丢一条也绝不重复刷屏；
+  - 抓取/发送都在后台 task（每群一把锁），不阻塞消息 worker；
+  - 欢迎语不受出站复读保护影响（`send_text(..., bypass_repeat_guard=True)`），
+    AI 回复保持原行为；
+  - 静默时段 `quietHours`、`mention` 开关、模板占位符 `{name}` / `{group}`。
+- **配置**：`wpp_whitelist.json` 的 `join_welcome` 段，3 秒热更新，无需重启；
+  `enabled` 默认 `false`。新增 `mode: whitelist`（动态跟随群白名单，推荐）。
+- **命令**：filehelper `/welcome on|off|list`；`/help` 增加进群欢迎摘要。
+
+### 变更
+- `save_policy()` 改为**读-改-写**：`/group add` 等命令只更新自己负责的键，
+  不再抹掉 `join_welcome` 及用户手写的未知配置。
+- 新增 `WppClient.fetch_group_snapshot()`（绕过 30 分钟群资料缓存，空成员=失败）。
+- 新增纯函数模块 `wpp_join_events.py`（通知识别）与
+  `wpp_join_welcome.py`（配置/diff/文案）。
+- 运行时数据新增 `members.json`（群成员基线）。
+
+### 测试
+- 新增进群事件识别、欢迎配置/diff、成员快照、`members.json` 持久化、
+  `/welcome` 命令与完整主路径（通知 → diff → 发送）用例；测试总数 210。
+
+## v0.8.1 (2026-10-17) — 配置边界与策略校验
+
+### 变更
+- 明确配置边界：控制台是运行时策略的唯一日常入口；平台适配器只负责
+  vendor 地址/authcode/账号列表/Heartflow 模式等连接与启动配置。
+- 控制台顶部新增说明条；适配器配置 hint 标注白名单/群策略字段为启动初始值。
+- 策略更新 API 增加服务端校验：群黑名单/主动候选必须是 `@chatroom` 群 ID，
+  私聊黑名单不接受群 ID；与页面校验保持一致。
+- 策略更新改为"先全部校验、再统一应用"，避免多字段提交时部分字段已改到
+  内存却没有落盘。
+- 状态刷新 API 返回 `failed` 明细，单个账号刷新失败不再被静默吞掉；
+  控制台对部分失败给出明确提示。
+
+## v0.8.0 (2026-10-17) — 控制面板重做
+
+### 新增
+- **WPP 控制台**（`pages/console`）整体重做：
+  - 顶部概览卡片：账号数、在线数、群白名单数、生效主动候选数、发送成功/失败；
+  - 账号卡片：在线状态、昵称/wxid、群白名单/生效主动/队列/发送统计、
+    最近发送错误提示；
+  - 编辑区按「私聊准入 / 群聊准入」分组，输入时实时计算并预览生效主动候选；
+  - 保存前校验群 ID 必须以 `@chatroom` 结尾，避免把群 ID 误填进私聊白名单；
+  - 保存后就地更新卡片、汇总和 Heartflow 目标，不刷新整个页面；
+  - 有未保存修改时，「刷新状态」只更新状态/统计并保留表单；
+  - 响应式布局 + 深色主题，跟随 Dashboard 主题。
+- **WPP 账号诊断**（`pages/diagnostics`）重做：展示已配置账号的在线状态，
+  保留 X-Access-Token 单账号诊断（昵称/wxid/地区/签名），Token 不落盘。
+- **状态刷新 API**：`POST /astrbot-plugin-wpp/status-refresh`，按实例/账号
+  立即调用适配器 `_refresh_account_status`，返回最新策略视图。
+- **Heartflow 同步视图**：控制台显示 `auto`/`custom` 模式、实际目标群数、
+  被群白名单拒绝的群，便于排查白名单不变量。
+- **页面 i18n**：新增 `.astrbot-plugin/i18n/zh-CN.json` 与 `en-US.json`，
+  Dashboard 页面标题显示「WPP 控制台」「WPP 账号诊断」。
+- **控制台作为插件首页**：页面目录改为 `pages/console` + `pages/diagnostics`，
+  按字母排序时控制台在前，Dashboard「打开插件UI界面」直接进入控制台。
+
+### 变更
+- `/policy` Web API 响应新增 `version`、`heartflow_mode`、
+  `heartflow_custom_groups`、`heartflow_target_groups`、
+  `heartflow_rejected_groups`；仍无顶层 `data` 字段。
+- 策略更新接口的字符串列表支持逗号、换行、分号分隔（控制面板直接提交数组，
+  手写 API 调用更宽容）。
+
+### 测试
+- 新增策略查询版本/状态、状态刷新、实例 Heartflow 视图、换行/分号列表用例；
+  测试总数 155。
+- 使用 Playwright 对控制台/诊断页做真实浏览器冒烟：卡片渲染、实时预览、
+  保存回写、群 ID 校验、状态刷新、Heartflow 同步、深浅色与移动端布局。
+
+## v0.7.4 (2026-10-17) — /help 改为微信纯文本
+
+### 修复
+- filehelper `/help` 不再使用 Markdown 风格/对齐排版，适配微信纯文本：
+  - 去掉竖线分隔、列对齐、方括号参数和 Markdown 符号；
+  - 策略摘要改为逐行短句；
+  - 命令改为「命令一行 + · 说明一行」，按私聊/群聊/帮助分组；
+  - 使用 `────────────────` 分隔区块；
+  - 命令占位符改为 `wxid` / `群ID` / `[可多个]`，避免长参数串换行。
+- `/help <命令>` 详情同样使用纯文本格式。
+
+### 测试
+- 新增微信纯文本断言（无 `**`、反引号、`|`），并更新摘要/详情断言；
+  测试总数 152。
+
+## v0.7.3 (2026-10-17) — /help 与文档完善
+
+### 变更
+- **filehelper `/help` 适配新版能力**：
+  - 从 `metadata.yaml` 读取版本，不再硬编码；
+  - 展示当前账号策略摘要（私聊/群白名单、显式与生效主动候选、黑名单群、
+    群模式、是否必须 @）；
+  - 命令按「私聊 / 群聊准入 / 帮助」分组；
+  - 新增 `/help <命令>` 单条详情（如 `/help group`）；
+  - 明确说明群白名单自动成为主动候选、适配器只准入不唤醒、Heartflow
+    `auto`/`custom` 模式及「群白名单必须包含心流白名单」不变量。
+- 更新命令描述，区分「白名单自动主动」与「显式补充主动」。
+- **README 完善**：新增快速开始、目录、完整命令参考、群消息准入顺序、
+  常见问题、开发与测试、版本与兼容性；修正 Heartflow 同步/回滚说明。
+- **DEPLOY 完善**：新增 Heartflow 白名单章节、全量测试/主路径冒烟/部署
+  流程、Heartflow 子集告警与 `/help` 排查；`deploy.sh` 同时检查
+  `aiohttp` + `websockets`。
+
+### 测试
+- 新增 `/help` 版本、策略摘要、分组命令、单命令详情、未知命令、
+  `group_reply=none`/黑名单群生效数用例；测试总数 151。
+
+## v0.7.2 (2026-10-17) — Heartflow 白名单来源可选
+
+### 新增
+- **Heartflow 白名单两种来源**（`wpp_heartflow_whitelist_mode`）：
+  - `auto`（默认）：参考 WPP 群白名单，Heartflow 白名单 = 群白名单 + 显式
+    `proactive_groups`，再与群白名单取交集；
+  - `custom`：使用 `wpp_heartflow_groups` 单独设置，适合“群白名单很大，
+    只让心流观察其中几个群”。
+- **强制不变量：群白名单必须包括心流白名单**。`custom` 中不在
+  `allow_users` 群白名单里的群会被拒绝并跳过同步，同时写 WARNING；
+  避免 Heartflow 白名单包含适配器根本不会放行的群。
+- 新增 `wpp_heartflow_groups` 配置项（逗号分隔群 ID）。
+
+### 测试
+- 新增 auto/custom 解析、custom 子集校验、空群白名单等用例；测试总数 143。
+
+## v0.7.1 (2026-10-17) — 主动回复与群白名单共用
+
+### 变更
+- **生产主动回复改为与群白名单共用同一份列表**：`allow_users` 中的
+  `@chatroom` 群 ID 自动作为主动候选群，未 @ 消息也会放行给 AstrBot；
+  不再需要把同一个群重复加入 `proactive_groups`。
+- `proactive_groups` 继续保留，作为未配置群白名单时的显式补充；群白名单
+  存在时仍不能绕过白名单/黑名单/`group_reply=none`。
+- filehelper 命令输出同步调整：
+  - `/group add|list` 明确提示白名单群已自动纳入主动候选；
+  - `/proactive list` 区分“白名单自动纳入”和“显式候选”；
+  - `/proactive del` 提示该群是否仍因白名单自动生效；
+  - `/proactive add` 提示未进群白名单时不会放行。
+- 策略页新增 `auto_proactive_groups` / `effective_proactive_groups`，
+  并提示白名单自动共用。
+- Heartflow 同步逻辑不变（原本已是群白名单 ∪ 主动候选群），现在适配器
+  准入与 Heartflow 白名单语义一致。
+
+### 测试
+- 新增群白名单自动主动候选、私聊白名单不影响群、显式候选仍受群白名单
+  约束等用例；真实主路径冒烟新增 1 项。测试总数 139，主路径 21/21。
+
+## v0.7.0 (2026-10-17) — 长回复引用 / 入站资料 / 出站稳定性
+
+### 修复
+- **长回复丢失引用和 @**：v0.6.x 只在回复 ≤500 字时走引用气泡，长回复直接退化成
+  普通文本，引用和 @ 全部丢失。现在引用气泡发送第一段（含 `@昵称` 前缀），
+  剩余内容作为普通文本续发，**不截断、不丢引用/@**；引用发送失败时自动回退
+  普通文本，不再吞掉整条回复。
+- **引用气泡 @ 前缀挤出正文**：按昵称长度预留前缀空间，保证
+  `@昵称 + head` 不超过 500 字上限。
+
+### 新增
+- **入站昵称/群资料预取**：
+  - 群消息首次到达时预取群名、群主、头像、成员昵称表
+    （`/Group/GetChatRoomInfoDetail` + `/Group/GetChatRoomMemberDetail`），
+    写入 `AstrBotMessage.group`，AI 提示词看到的是“张三”而不是 `wxid_xxx`；
+  - 私聊缺 `fromNick` 时查通讯录昵称；
+  - 缓存 30 分钟（失败负缓存 60 秒），同一份成员昵称表也供引用回复 @ 使用，
+    预取后引用回复通常零额外请求；群信息/成员查询只有**都成功**才走长缓存，
+    部分失败 60 秒后自动重试，避免成员昵称缺失半小时。
+- **出站串行 + 节流**：同一会话整条消息链持有会话级锁，分片不会交错；
+  vendor 发送请求按 `wpp_send_interval_ms`（默认 300ms）串行。
+- **发送结果统计**：`sent / failed / consecutive_failures / last_error` 进入
+  `WppAccount.stats["send"]`，WebUI/策略页可见；连续失败 3 次告警。
+- **出站复读保护**：同一会话相同文本在 300 秒内第 3 次起跳过
+  （`wpp_outbound_repeat_*` 可调），防止 LLM 复读刷屏。
+- **策略管理 Dashboard 页**：`pages/policy/index.html`，可查看/修改各账号的
+  `allow_users / block_users / blacklist_groups / proactive_groups /
+  group_reply / require_at_mention`，并一键同步 Heartflow；
+  新增 Web API `/astrbot-plugin-wpp/policy`、`/policy/update`、
+  `/heartflow-sync`。
+- **管理员聊天命令**（AstrBot `PermissionType.ADMIN`）：
+  - `/wpp_policy` 查看全部策略
+  - `/wpp_policy <账号> <字段> add|del|set <值...>`
+  - `/wpp_sync [实例id]` 立即同步 Heartflow 白名单
+- **Heartflow 白名单周期自愈**：除启动/策略变更/热更新外，每 5 分钟幂等同步一次；
+  `group_reply=all` 且无法枚举全部群时告警一次。
+- **媒体懒加载开关** `wpp_lazy_media`（默认 `true`）：启用内置
+  `group_icl_enable` / `group_message_history_enable` 时设为 `false`，
+  可在事件创建阶段就拿到真实图片/文件/视频。
+- **其它消息类型明确处理**：表情包（type=47）保留占位文本；好友申请
+  （`fmessage`）、群邀请/系统消息、拍一拍等 sysmsg 静默并归类日志。
+- `metadata.yaml` 增加 `astrbot_version: ">=4.16.0,<5"`；新增
+  `pyproject.toml`（ruff 配置）与 GitHub Actions CI（ruff + compileall）。
+- 新增 `tests/test_mainpath_smoke.py`（真实主路径 24 项断言）、
+  `tests/test_client_guard.py`（群资料/节流/复读/统计）、
+  `tests/test_policy_api.py`。
+
+### 配置
+新增平台配置项：
+`wpp_lazy_media`、`wpp_send_interval_ms`、`wpp_outbound_repeat_guard`、
+`wpp_outbound_repeat_window`、`wpp_outbound_repeat_limit`。
+
+### 测试
+- 测试总数 136；真实主路径冒烟 24/24；真实 vendor 只读群资料冒烟通过
+  （群名/群主/4 名成员昵称）。
+
+## v0.6.3 (2026-10-17) — 白名单自动同步到 Heartflow
+
+### 新增
+- **WPP 群白名单 → Heartflow `chat_whitelist` 单向同步**（`wpp_heartflow.py`）：
+  - 同步源：各账号 `allow_users` 中的群 ID + `proactive_groups`
+  - 只替换本平台实例的 `<platform_id>:GroupMessage:` 条目，保留其他平台/手写条目
+  - `/group`、`/proactive` 增删后立即同步；`wpp_whitelist.json` 外部热更新后同步；
+    适配器启动时同步
+  - 写盘后同时更新已加载的 Heartflow 实例的 `chat_whitelist`，**无需重启 AstrBot**
+  - 原子写保留原文件 BOM；未安装 Heartflow / 无配置文件时自动跳过
+- 新增配置项 `wpp_sync_heartflow_whitelist`（默认 `true`，可关闭）
+- 新增 `tests/test_heartflow_sync.py`（8 个用例）
+
+### 测试
+- 测试总数 113
+
+## v0.6.2 (2026-10-17) — 引用回复补全真实昵称
+
+### 修复
+- **群聊引用回复只有引用、没有 @ 昵称**：入站消息缺少 `fromNick` 等昵称字段时，
+  适配器会用 wxid 兜底，核心 `reply_with_mention` 生成的 `At.name` 因此等于 wxid；
+  v0.6.1 为避免发出 `@wxid_xxx` 直接跳过了前缀，导致实际没有 @。
+  现在引用回复发送前按以下顺序解析显示名：
+  1. `At.name`（非 wxid）
+  2. `Reply.sender_nickname`
+  3. vendor 群成员列表 `/Group/GetChatRoomMemberDetail`（非好友也能查）
+  4. 通讯录 `/Friend/GetContractDetail`
+  5. 仍查不到时退回 `@wxid`（与 wpp-openclaw `displayName || fromusr` 一致）
+- 昵称按 `(群, wxid)` 缓存 30 分钟，查询超时 5 秒；失败/超时不影响消息发送。
+- `@全体成员`（`AtAll`）不添加引用前缀。
+
+### 测试
+- 新增 `tests/test_nickname.py`（6 个用例）及引用昵称解析用例
+- 测试总数 105；真实主路径冒烟 20/20；真实 vendor 只读冒烟通过
+
+## v0.6.1 (2026-10-17) — 群聊回复引用 + @ 发送人
+
+### 修复
+- **群聊回复不引用原消息、不 @ 发送人**：补齐 AstrBot 标准出站装饰的
+  平台侧支持。核心开启 `platform_settings.reply_with_mention` /
+  `reply_with_quote` 后会插入 `At` / `Reply` 组件，适配器现在能正确发送：
+  - `Reply.id` 改用入站 `NewMsgId`（svrid），不再用本地 `msg_id`；
+    `Reply` 缺发送者时由 `WppMessageEvent.send()` 从当前消息补全 `fromusr`
+  - 引用气泡（appmsg type=57）没有 At 字段，群聊时把 `At.name` 合并为
+    正文 `@昵称 ` 前缀（与 wpp-openclaw `buildGroupMentionPrefix` 一致）
+  - 普通文本回复仍走 `At` 字段；`AtAll` 行为不变
+
+### 配置
+- 生产已开启 `platform_settings.reply_with_mention=true` 与
+  `reply_with_quote=true`（AstrBot Dashboard → 平台设置）。
+- 该行为由 AstrBot 核心控制，插件不做额外开关；私聊/群聊均生效。
+
+### 测试
+- 新增引用+@、私聊不加前缀、Reply 发送者补全、NewMsgId 优先级用例
+- 测试总数 96；真实主路径冒烟 20/20
+
+## v0.6.0 (2026-10-17) — 主动回复候选群 + 媒体懒加载
+
+### 新增
+- **主动回复候选群 `proactive_groups`**：按群显式 opt-in，未 @ 的群消息也会
+  放行进入 AstrBot，但适配器**不设置唤醒标志、不强制回复**；是否接话由
+  Heartflow / 内置 `active_reply` 等决策插件判断。
+  - 单账号：`wpp_proactive_groups`
+  - 多账号：`wpp_accounts[].proactive_groups`
+  - filehelper：`/proactive add|del|list <群ID>`，`list` 会打印对应的
+    `unified_msg_origin`（供 Heartflow 白名单使用）
+- **准入与唤醒解耦**：新增 `wpp_policy.classify()`，返回 `allowed / at_me /
+  proactive / reason`；`is_allowed()` 保留为兼容布尔接口。
+- **媒体懒加载**：未 @ 放行的群消息只构造占位组件；图片/文件/视频在
+  `on_waiting_llm_request`（真正要调用 LLM 前）才下载。语音仍即时下载，
+  保证 `PreProcessStage` 的 silk→wav + STT 不被跳过。
+- `enrich_media()` 新增 `include` / `exclude` 参数，支持按媒体类型选择性下载。
+
+### 修复
+- **`group_reply="all"` 语义文档纠正**：它表示“放行所有群消息（观察模式）”，
+  并不强制回复；未 @ 且无唤醒前缀时仍需决策插件设置 `is_at_or_wake_command`。
+- **图片消息保留占位 `Plain("[图片]")`**：未 @ 图片懒加载时消息链不再为空，
+  避免内置群聊上下文/主动回复插件误判为“没有可处理内容”。
+
+### 准入顺序（群聊）
+`block_users → blacklist_groups → 群白名单 → group_reply=none →
+已 @（正常唤醒）→ proactive_groups（未 @ 放行）→ require_at_mention →
+group_reply=all（观察放行）→ 其他拒绝`
+
+### 测试
+- 新增 `tests/test_proactive.py`（18 个用例）
+- 测试总数 90
+- 真实主路径冒烟 20/20（含 proactive 放行、懒加载、语音即时下载）
+
+## v0.5.1 (2026-10-17) — self_id 修复 (群聊 @ 唤醒/心流兼容)
+
+### 修复
+- `AstrBotMessage.self_id` 改为优先使用机器人自己的 wxid，不再用
+  `recipient_id`。群消息的 `recipient_id` 可能是群 ID，若当作 self_id，
+  AstrBot 核心的 `At.qq == self_id` 唤醒判断会失效，心流等主动回复插件也无法
+  正确区分机器人与群友。
+- 新增对应测试，总计 71。
+
+## v0.5.0 (2026-10-17) — 出站引用回复 / 链接卡片 / 位置 / AtAll
+
+### 新增
+- **引用回复**：出站 `Reply` 组件 + 后续短文本合并为 appmsg `type=57`，走
+  `/Msg/ShareLink`（vendor `/Msg/Quote` 不可用的 gewe 范式）；`title/des` 为回复正文，
+  `refermsg` 携带 `svrid`（Reply.id）与 `fromusr`（Reply.sender_id）
+  - 正文超过 500 字符时降级为普通文本，避免截断长回复
+- **链接卡片**：`Share(url, title, content, image)` → `type=5` appmsg XML
+- **位置**：`Location(lat, lon, title, content)` → `/Msg/ShareLocation`（X=纬度, Y=经度）
+- **AtAll**：`AtAll` 不再被丢弃，`At` 字段传 `all`
+- 新增 `build_quote_reply_xml` / `build_share_link_xml` 纯函数（XML 转义）
+
+### 测试
+- 新增 `tests/test_send.py`（7 个用例）
+- 测试总数 70
+
+## v0.4.1 (2026-10-17) — 语音缺失转写时接入 AstrBot STT
+
+### 新增
+- **语音 STT 兜底**：vendor 没有 `voice.transcript` 时，从 `voice.download_context` 调用
+  `/Tools/DownloadVoiceBinary` 下载 silk 原文件，注入 AstrBot `Record` 组件；
+  由核心 preprocess 阶段 `ensure_wav`（内置 silk→wav）+ STT Provider 转写
+  - 与 NapCat 等平台路径一致，**不重复造 STT**
+  - 下载失败保留 `[语音] (下载失败)` 占位，不影响其他消息
+  - 20MB 上限；`to_user_name` / `from_user_name` 按 vendor v1 契约传参
+
+### 测试
+- 新增 3 个语音用例（download_context 提取、vendor 转写优先、silk→Record）
+- 测试总数 63
+
+## v0.4.0 (2026-10-17) — appmsg 结构化解析 + 全类型卡片可读
+
+### 新增：`wpp_appmsg.py`（纯函数卡片解析器）
+- 微信 appmsg / XML 卡片不再把**原始 XML 直接塞给 LLM**，统一解析为结构化摘要：
+  - **链接**（type 5）→ `[链接] 标题 | 描述 | URL`
+  - **小程序**（type 33/36）→ `[小程序] 标题 | 页面路径 | appid`
+  - **合并转发/聊天记录**（type 19）→ `[合并转发]` + 逐条 `发送人: 内容`（最多 20 条）
+  - **引用回复**（type 57）→ AstrBot 原生 `Reply` 组件
+  - **位置**（msgType 48）→ `[位置] 名称 | 纬度,经度`
+  - **名片**（type 42）→ `[名片] 昵称 | wxid`
+  - **接龙/群公告**（`app_message` / `#接龙`）→ `[接龙]` + 正文
+  - **文件**（type 6/8）→ 文件名 + 附件上下文
+  - **视频号/公众号卡片**、未知卡片 → `[卡片] 标题 | 描述` 兜底
+- 空 `content` 的卡片不再被整条丢弃（旧版直接 `return None`）
+- XML 安全清洗：去 BOM/控制字符、`&lt;` 反转义、裸 `&` 修复、256KB 上限、解析失败降级为纯文本
+
+### 修复
+- **卡片内容泄漏原始 XML**：历史消息/未知类型中的 `<msg><appmsg>...` 现在会被清洗成可读文本
+- **文件卡片附件丢失**：文件卡片统一从 `app.file.download_context` / `appattach` 提取 `attach_id`，旧版只看 `file` 字段
+- **文件名为 XML**：标题缺失时不再把整段 XML 当文件名
+- **支付卡片误判**：`红包/转账` 判定改为严格整句匹配 + 卡片结构校验；接龙正文含“红包”不误杀，链接卡片标题含“红包”不误杀
+- **群会话 ID 误取发送者**：`src_chatroom()` 不再把 `sender_id` 当群 ID（避免私聊被误判成群聊）
+- **@ 判断**：优先使用 vendor 结构化 `at_user_list` / `<atuserlist>`，不再要求正文含 `@`；`atbot` 模式不再因 `recipient_id` 启发式误放行
+- **媒体富化丢组件**：下载图片/文件/视频时保留 `At` / `Reply` / `Json` 等非媒体组件
+- **消息类型兼容**：字符串类型（`"image"`/`"voice"`/`"app"`）与仅 `kind` 字段的推送均可识别
+- **direction 兼容**：`in` / `recv` / `received` / `true` 均视为入站
+
+### 测试
+- 新增 `tests/test_appmsg.py`（21 个用例），覆盖链接/小程序/位置/名片/合并转发/引用/接龙/文件/支付/系统消息/@ 列表/原始 XML 防泄漏
+- 测试总数 60（原 39）
+
+## v0.3.1 (2026-10-17) — 系统消息静默 + 私聊黑名单
+
+### 修复
+- **"全部放行"模式下系统消息触发 AI 回复**：公众号、微信团队、微信支付、服务通知、财付通、微信安全中心、订阅号消息等系统/服务会话，现在**任何模式**都在进入 AstrBot 之前静默
+  - 判据统一收敛到 `wpp_messages.skip_reason()`（`to_astrbot_message` 与账号处理入口共用，避免两处漂移）
+  - 识别 sender/conversation/recipient 中的 `gh_` 前缀与系统 username；兼容服务通知 sender 为空、仅 `conversation_id=notifymessage` 的形态
+  - 同时静默：vendor `kind=status/system`、`msgType=51`（状态）、`10000`（系统消息）、`10002`（撤回）、`<sysmsg>` XML
+- **红包/转账/支付卡片静默**：只按卡片结构（`msgType=49` + app 元数据/XML）判定，**不按正文"红包"关键词**，避免误杀自带"红包"字样的群接龙（历史事故）
+- 每分钟 INFO 汇总新增被忽略消息分类计数（`system=` / `payment_card=` / ...），排查时无需开 debug
+
+### 新增
+- **私聊黑名单**：`wpp_block_users`（单账号）/ `wpp_accounts[].block_users`（多账号），全部放行模式下可排除指定 wxid；群聊里也会屏蔽该成员
+- filehelper 命令 `/block add|del|list`，运行时生效并持久化（与 `/user` 白名单互斥：加入黑名单会自动移出白名单）
+- 测试增至 39 个
+
+## v0.3.0 (2026-10-17) — 贴合 AstrBot 规范的重构 + 稳定性修复
+
+### 架构重构（模块拆分）
+- 新增 `wpp_messages.py`：vendor 消息解析/转换纯函数（事件过滤、@/引用、媒体元数据）
+- 新增 `wpp_policy.py`：白名单/群回复策略纯函数（可单测）
+- 新增 `wpp_media.py`：图片/文件/视频下载与消息链富化
+- 新增 `wpp_send.py`：出站消息链发送（Plain/At/Image/File/Record/Video）+ 长文本分片
+- 新增 `wpp_commands.py`：filehelper 命令注册表
+- 新增 `wpp_storage.py`：运行时数据持久化（原子写 + 旧目录迁移）
+- `wpp_account.py` / `wpp_adapter.py` / `main.py` 相应重写精简
+
+### 稳定性修复
+- **WS 收包不再被媒体下载阻塞**：`asyncio.Queue`（上限 1000）+ 单 worker 顺序处理；队列满时丢弃最旧并计数告警
+- **日志刷屏根因修复**：vendor 的 `friend_circle_update` 等非消息事件同样带 `items`，旧版误当消息处理（72h 内 4805 条 WARNING）。现按 `Data.type` 白名单过滤，过滤日志降为 debug + 每分钟 INFO 汇总
+- **去重落盘**：消息 ID 环形缓冲（500）持久化到 `dedup.json`，重启后不再重复处理历史消息
+- **群 @ 判断修正**：`require_at_mention` 必须 @ 机器人本人（旧版 @ 任意群友都放行）
+- **群图片下载目标修正**：群聊 `DownloadImg` 的 `to_wxid` 使用群 ID（与 wpp-openclaw 一致）
+- **临时文件管理**：媒体文件用唯一文件名，并 `event.track_temporary_local_file()` 交给 AstrBot 事件结束清理
+- **文件/视频发送**：新增 `SendFile` / `SendVideo` / `SendVoice` 端点支持
+- **发送重试安全**：发消息类非幂等接口网络错误不重试，避免重复发送；文件下载改为流式 + 200MB 上限
+
+### AstrBot 规范对齐
+- 平台元数据缓存在 `self.metadata`，`support_streaming_message=False`
+- 新增 `create_event()`；`send_by_session()` 复用 `send_chain` 并调用基类上报 metric
+- 会话 → 账号绑定（`bind_session`），多账号下主动推送也能路由到正确账号
+- 运行时数据迁移到 `data/plugin_data/astrbot-plugin-wpp/`（不再写插件源码目录）
+- 移除废弃的 `@register` 装饰器（类名 `WppPlugin` 自动发现）
+- `config_metadata` 修正：`isSecret` → `secret`，`wpp_webhook_enabled` 使用 `bool` 类型
+- 修复 `/wpp_status` 引用已移除的 `platform._api`（现遍历各账号）；Web API 的 `base_url` 增加配置白名单校验（防 SSRF）
+
+### 测试
+- 新增 `tests/test_core.py`（事件过滤/消息转换/策略/分片/持久化）；总计 32 个测试通过
+
+## v0.2.0 (2026-08-26) — WS 实时主通道 + 单实例多账号
+
+### WS 实时通道（主通道，webhook 退役）
+- **WS 实时主通道**：连 vendor `/ws/sync`（`wpp_ws_url`），连接即拉全量离线 + 实时消息，自动重连（指数退避 1s→30s）
+- **根因修复**：之前 vendor 长连接断无人连 WS → 消息进离线队列 → webhook 收不到。WS 客户端连上即恢复
+- **webhook 退役**：`wpp_webhook_enabled` 默认 false（WS 断时 webhook 也收不到，无保留价值）
+
+### 单实例多账号（v0.2.1 完善）
+- **`WppAccount` 类**：单实例内管理多个微信账号，同一 vendor 地址通过不同 `authcode` 隔离
+- **每账号独立**：WS 连接 / 白名单 / 群策略 / 黑名单 / 消息去重 / 机器人身份 / filehelper 命令
+- **`wpp_accounts` JSON 配置**：多账号模式；`wpp_auth_token` 单账号向后兼容
+- **白名单按账号隔离**：`accounts/<account_id>/wpp_whitelist.json`
+- **测试**：`tests/` 7 个 pytest（账号解析/隔离/回退）
+
+### 新增文件
+- `wpp_account.py` — WppAccount 类（账号级 WS + 白名单 + 消息处理）
+- `tests/test_multi_account.py` — 多账号架构测试
+
+## v0.1.0 (2026-08-21)
+
+AstrBot 微信 WPP (WeChatPadPro) 平台适配器首个可用版本，已开源。
+
+### 功能
+- **文本收发闭环**：微信文本消息 → vendor push → webhook → AstrBot 事件总线 → AI 回复 → SendTxt → 微信
+- **图片接收**：v1 图片消息 CDN 完整大图下载 (`/Tools/CdnDownloadImage`) + DownloadImg 兜底，注入 AI 消息链
+- **语音转文字**：vendor 语音消息自带 `voice.transcript`（微信官方转写），直接作文本进 AI，无需 STT
+- **文件接收**：`file.download_context` → `DownloadFileBinary` 下载 → `File` 组件注入，AI 可读取内容
+- **视频接收**：`video.download_context` → `DownloadVideo` 分片下载 → `Video` 组件注入
+- **多消息遍历**：vendor 一次推送多条（count=N），遍历处理不再漏消息
+- **白名单**：`wpp_allow_users` 逗号分隔 wxid，私聊仅白名单触发 AI
+- **群消息策略**：`wpp_group_reply` = atbot / none / all（atbot 只回 @机器人）
+- **账号信息页面**：Dashboard 插件 Pages，查昵称/wxid/地区/签名/邮箱/手机/在线状态
+- **自动心跳**：账号 offline 时自动调 `/Login/AutoHeartBeat` 拉上线
+- **在线状态**：`get_stats()` 返回 `account_status`（供卡片/API）
+- **图标**：`logo.png`（插件 + 平台适配器共用）
+- **`wpp_status` 命令**：查询账号在线状态
+
+### 架构
+- `main.py` — 插件入口 (Star) + Web API (account-info)
+- `wpp_adapter.py` — 平台适配器（webhook + 消息转换 + 白名单 + 发送 + 心跳）
+- `wpp_client.py` — WPP vendor API 封装（retry + 超时）
+- `wpp_event.py` — `WppMessageEvent` 重写 `send()` 真正发消息
+- `pages/account-info/` — Dashboard 账号信息页面
+
+### 关键契约
+- WPP API 端口 18062（`wechatpadpromax`；18080 是 mitmdump 代理）
+- 鉴权 `X-Access-Token` header = authcode（同一值，双保险都注入）
+- vendor push 为 v1 `messages` 格式（sender_id/recipient_id/type/is_group）
+- 图片消息 `image.cdn_download_contexts` → CdnDownloadImage
+
+### 踩坑记录
+1. AstrBot 插件目录是 namespace package → main.py 顶层 import 适配器
+2. `register_star` 签名 `(name, author, desc, version, repo)`
+3. 平台适配器插件必须同时有 Star 类
+4. 插件 Web API 响应不能有顶层 `data` 字段（前端解构 `r.data.data` 冲突）→ 用 `account_data`
+5. 插件日志必须用 `from astrbot import logger`（否则 plugin_tag 报错）
+6. AstrBot 回复走 `event.send()`，基类不真正发送 → 平台子类重写
+7. DownloadImg 用 `local_id`（uint32）不是 svr_id；CDN 路径优先
+8. `LongLinkStatus.state:disconnected` 不可靠，以实际收发为准
+9. Dashboard 卡片标题用 `s.type||s.id` 硬编码，display_name 改不动卡片
+
+### 已开源
+- GitHub: https://github.com/jiexiaoyin/astrbot-plugin-wpp
+- 脱敏：宿主 IP→127.0.0.1，authcode/wxid 泛化，单 commit 无敏感历史

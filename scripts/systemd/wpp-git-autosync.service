@@ -1,0 +1,13 @@
+[Unit]
+Description=WPP 仓库 git 自动同步（提交 + 推送）
+Documentation=file:/usr/local/bin/wpp-git-autosync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wpp-git-autosync
+# 自动提交失败不要刷屏；输出进 journal 便于排查
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
