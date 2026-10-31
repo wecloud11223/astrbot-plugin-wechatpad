@@ -249,7 +249,7 @@ def _parse_account(platform_config: dict) -> dict | None:
     if not base_url:
         logger.error(
             "[WPP Cloud] 未配置 wpp_gateway_url：请填写 WPP 网关地址，"
-            "例如 https://wpp.example.com/api/v1/gateway"
+            "例如 https://cloud.juhe.chat/api/v1/gateway"
         )
         return None
     return {

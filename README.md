@@ -122,7 +122,7 @@ docker restart astrbot
 
 | 字段 | 说明 |
 | --- | --- |
-| `wpp_gateway_url` | `https://<平台域名>/api/v1/gateway`，也可只填 `https://<平台域名>` |
+| `wpp_gateway_url` | `https://cloud.juhe.chat/api/v1/gateway`，也可只填 `https://cloud.juhe.chat` |
 | `wpp_gateway_token` | 平台签发的网关令牌 `wxa_…` |
 | `unified_webhook_mode` | 默认开启，多账号共用 AstrBot 端口 |
 | `webhook_uuid` | 统一 Webhook 标识，留空按实例 id 派生 |
