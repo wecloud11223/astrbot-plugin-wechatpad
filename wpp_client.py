@@ -5,8 +5,7 @@
   - basePath = ``https://<host>/api/v1/gateway``（由上层归一化）
   - 鉴权: ``Authorization: Bearer wxa_...``（每托管账号一把网关令牌）
   - URL 不再拼 ``/api``，也不再带 ``?authcode=``；``TokenKey`` 不发送
-  - 控制面（Admin/Webhook/Runtime/Customized、扫码/退出等 Login 接口）
-    在本地先挡（``cloud_blocked``），错误信息可直接行动
+  - 控制面类接口在本地先挡（``cloud_blocked``），只放行业务面与状态查询
   - 发文本: POST .../Msg/SendTxt  body={ToWxid, Content, At, Type:1}
   - 发图片: POST .../Msg/UploadImg  body={ToWxid, Base64}
   - 入站拉取: POST .../Msg/Sync  body={Scene: 0, Synckey: <游标>}
