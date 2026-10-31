@@ -138,8 +138,8 @@
 ### 变更
 - **传输面改为 WPP 网关**：`.../api/v1/gateway` + `Authorization: Bearer wxa_...`；
   不再拼 `/api`、不再带 `?authcode=`、不再发送 `TokenKey`。
-- **本地网关边界**：Admin/Webhook/Runtime/Customized、扫码/退出、SetProxy、
-  GetBoundHardDevices、StartAutoSync 等在客户端先挡（`cloud_blocked`）。
+- **本地网关边界**：控制面/回调注册/运行时管理类接口与扫码、退出等操作由客户端
+  预先拦截（`cloud_blocked`），只放行业务面与状态查询。
 - **入站改为 WPP 回调 + /Msg/Sync**：不建立 vendor WS；回调只负责通知，
   正文统一从 `/Msg/Sync` 拉取。
 - **首次同步不回放**：只建立 `KeyBuf` 游标；先派发后前进游标；读游标失败

@@ -148,14 +148,10 @@ docker restart astrbot
 
 ---
 
-## 网关边界（本地先挡一次）
+## 安全边界
 
-平台网关只开放业务面，插件对越界调用直接报可读错误：
-
-- 屏蔽家族：`Admin` / `Webhook` / `Runtime` / `Customized`
-- 屏蔽操作：`/Tools/SetProxy`、`/Tools/GetBoundHardDevices`、
-  `/Msg/StartAutoSync`、`/Msg/StopAutoSync`
-- `Login` 仅放行：`GetLoginStatus`、`LongLinkStatus`、`HeartBeatLong`、`AutoHeartBeat`
+平台网关只开放业务面：控制面、回调注册、运行时管理等非业务接口由客户端本地预挡，
+越界调用会直接返回可读错误，不会打到平台。具体策略随平台版本调整，不在文档中展开。
 
 ## 可靠性细节
 
