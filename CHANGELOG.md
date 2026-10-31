@@ -876,6 +876,7 @@ AstrBot 微信 WPP (WeChatPadPro) 平台适配器首个可用版本，已开源�
 8. `LongLinkStatus.state:disconnected` 不可靠，以实际收发为准
 9. Dashboard 卡片标题用 `s.type||s.id` 硬编码，display_name 改不动卡片
 
-### 已开源
-- GitHub: https://github.com/jiexiaoyin/astrbot-plugin-wpp
-- 脱敏：宿主 IP→127.0.0.1，authcode/wxid 泛化，单 commit 无敏感历史
+### 开源
+- 仓库: https://github.com/wecloud11223/astrbot-plugin-wechatpad
+- 平台: https://cloud.juhe.chat
+- 脱敏：宿主 IP→127.0.0.1，authcode/wxid 泛化

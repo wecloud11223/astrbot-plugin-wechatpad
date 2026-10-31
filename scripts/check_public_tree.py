@@ -27,7 +27,7 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("网关令牌", re.compile(r"\bwxa_[A-Za-z0-9]{24,}\b")),
     ("云密钥", re.compile(r"\b(?:sk-[A-Za-z0-9]{32,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36})\b")),
     ("私钥", re.compile(r"BEGIN [A-Z ]*PRIVATE KEY")),
-    ("厂商域名", re.compile(r"\b(?:wx|oss|adm)\.juhe\.chat\b|juhe\.chat")),
+    ("厂商域名", re.compile(r"\b(?:wx|oss|adm)\.juhe\.chat\b|(?<!cloud\.)\bjuhe\.chat\b")),
     ("内网主机", re.compile(r"\b(?:10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)\b")),
     ("本机绝对路径", re.compile(r"/root/")),
 )

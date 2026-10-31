@@ -1,4 +1,4 @@
-# 部署说明（WPP Cloud 分支）
+# 部署说明
 
 ## 路径
 
@@ -17,7 +17,7 @@ bash deploy.sh
 ```
 
 `deploy.sh` 只做三件事：整目录拷贝（排除 tests/缓存）→ 检查 `aiohttp` → 重启
-AstrBot。不会改 AstrBot 核心代码，也不会向 vendor 注册任何回调。
+AstrBot。不会改 AstrBot 核心代码，也不会自行注册任何回调（回调由平台控制台管理）。
 
 ## 在 Dashboard 添加实例
 
