@@ -22,7 +22,7 @@ AstrBot。不会改 AstrBot 核心代码，也不会自行注册任何回调（�
 ## 在 Dashboard 添加实例
 
 1. 平台适配器 → 添加 **个人微信(Pad协议)**（下拉里的名字就是技术名）。
-2. 填 `wpp_gateway_url`、`wpp_gateway_token`；`webhook_public_url` 填
+2. 填 `wpp_gateway_url`（`https://cloud.juhe.chat/api/v1/gateway`）、`wpp_gateway_token`；`webhook_public_url` 填
    **AstrBot 自己的公网域名**（例如 `https://astrbot.example.com`）。
    `unified_webhook_mode` 保持默认开启：回调走
    `https://<域名>/api/platform/webhook/<webhook_uuid>`，由 AstrBot 端口代收，

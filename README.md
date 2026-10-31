@@ -106,6 +106,11 @@
 账号导入 [云端社交聚合平台](https://cloud.juhe.chat) 后，在账号详情里**签发网关令牌**
 （`wxa_…`，只完整展示一次，重新签发会让旧令牌失效）。
 
+扫码登录被要求人脸 / 安全验证时，走平台侧方案，插件不用改配置：
+
+- [Pad 人脸 / 滑块验证使用方案](docs/face-verify.md) — 第二台手机装 CA + 代理，完成人脸/滑块
+- [AID 住宅出口使用方案](docs/residential-egress.md) — 把登录出口固定到自己的公网主机
+
 ### 2. 安装插件
 
 ```bash
@@ -147,6 +152,15 @@ docker restart astrbot
 平台页能看到账号状态；`/help` 可确认插件已加载。
 
 ---
+
+## 平台侧能力
+
+以下能力都在**平台控制台**使用，插件侧不需要额外配置：
+
+| 方案 | 解决什么 | 入口 | 详细说明 |
+| --- | --- | --- | --- |
+| Pad 人脸 / 滑块验证 | iPad 协议扫码后被要求人脸识别或安全验证 | 控制台 → 帮助 → 人脸验证 | [docs/face-verify.md](docs/face-verify.md) |
+| AID 住宅出口 | 把扫码登录的网络出口固定到自己的公网主机 | 控制台 → 住宅出口 | [docs/residential-egress.md](docs/residential-egress.md) |
 
 ## 安全边界
 
@@ -196,6 +210,8 @@ docker run --rm \
 ## 链接
 
 - 云端社交聚合平台：<https://cloud.juhe.chat>
+- [Pad 人脸 / 滑块验证](docs/face-verify.md)
+- [AID 住宅出口](docs/residential-egress.md)
 - 问题反馈：<https://github.com/wecloud11223/astrbot-plugin-wechatpad/issues>
 - 协作与自动同步约定：[AGENTS.md](AGENTS.md)（commit 后 hook 自动推送 + 定时兜底；
   提交前跑 `python3 scripts/check_public_tree.py`）
