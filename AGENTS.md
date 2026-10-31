@@ -37,6 +37,15 @@
 
   远端：`git@github-wecloud11223:wecloud11223/astrbot-plugin-wechatpad.git`。
 
+## 🧪 CI 说明
+
+| job | 跑什么 | 说明 |
+| --- | --- | --- |
+| `lint` | `ruff check .` + `compileall` + `scripts/check_public_tree.py` | 公开 runner 上恒绿 |
+| `test` | `pytest tests` | 在 `soulter/astrbot:v4.29.1` 官方镜像里跑；**目录名必须等于包名** `astrbot_plugin_wpp_cloud`（测试用 `importlib.import_module("astrbot_plugin_wpp_cloud.*")`，符号链接会被 `Path(__file__).resolve()` 解析掉） |
+
+本地复现 CI：把本目录复制成 `astrbot_plugin_wpp_cloud/` 再挂进容器跑 `python -m pytest tests -q`。
+
 ## 🚫 铁律
 
 1. **不要改 AstrBot 核心**：只动本插件目录；`/AstrBot/data/` 下是容器运行时数据

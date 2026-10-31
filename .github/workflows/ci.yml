@@ -2,8 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [main, master]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -19,6 +22,8 @@ jobs:
         run: ruff check .
       - name: Byte-compile
         run: python -m compileall -q main.py wpp_*.py
+      - name: Public tree scan (secrets / real identifiers)
+        run: python scripts/check_public_tree.py
 
   # 测试依赖 astrbot 包 (事件/组件类型), 宿主机没有 ⇒ 直接跑在官方镜像里,
   # 与生产容器版本保持一致。
@@ -28,8 +33,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run tests in AstrBot container
         run: |
+          # 目录名必须等于包名 astrbot_plugin_wpp_cloud（tests 用
+          # importlib.import_module("astrbot_plugin_wpp_cloud.*")），符号链接会被
+          # Path(__file__).resolve() 解析掉，所以只能挂真实路径。
           docker run --rm \
-            -v "$PWD:/tmp/astrbot_plugin_wpp" \
-            -w /tmp/astrbot_plugin_wpp \
+            -v "$PWD:/AstrBot/data/plugins/astrbot_plugin_wpp_cloud" \
+            -w /AstrBot/data/plugins/astrbot_plugin_wpp_cloud \
             soulter/astrbot:v4.29.1 \
             python -m pytest tests -q
